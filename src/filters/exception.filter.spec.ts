@@ -1,0 +1,1401 @@
+import { faker } from "@faker-js/faker"
+import { ApplicationLogger } from "@neomaventures/logging"
+import { MockLogger } from "@neomaventures/logging/testing"
+import { executionContext, express } from "@neomaventures/mocks"
+import {
+  type ArgumentsHost,
+  BadRequestException,
+  type HttpException,
+  HttpStatus,
+  InternalServerErrorException,
+  NotFoundException,
+  ServiceUnavailableException,
+  UnprocessableEntityException,
+} from "@nestjs/common"
+import { Test } from "@nestjs/testing"
+
+import { MODULE_OPTIONS_TOKEN } from "../exception-handler.module-definition"
+
+import { NeomaExceptionFilter } from "./exception.filter"
+
+const httpExceptions = [
+  new BadRequestException(faker.hacker.phrase()),
+  new NotFoundException(faker.hacker.phrase()),
+  new UnprocessableEntityException(faker.hacker.phrase()),
+  new InternalServerErrorException(faker.hacker.phrase()),
+  new ServiceUnavailableException(faker.hacker.phrase()),
+]
+
+const warnExceptions = [
+  new BadRequestException(faker.hacker.phrase()),
+  new UnprocessableEntityException(faker.hacker.phrase()),
+]
+
+const debugExceptions = [new NotFoundException(faker.hacker.phrase())]
+
+const errorExceptions = [
+  new InternalServerErrorException(faker.hacker.phrase()),
+  new ServiceUnavailableException(faker.hacker.phrase()),
+]
+
+const unhandledExceptions = [
+  new Error(faker.hacker.phrase()),
+  new TypeError(faker.hacker.phrase()),
+]
+
+describe("new NeomaExceptionFilter()", () => {
+  let filter: NeomaExceptionFilter
+  let logger: MockLogger
+
+  beforeEach(async () => {
+    logger = new MockLogger()
+    const module = await Test.createTestingModule({
+      providers: [
+        NeomaExceptionFilter,
+        { provide: ApplicationLogger, useValue: logger },
+        { provide: MODULE_OPTIONS_TOKEN, useValue: {} },
+      ],
+    }).compile()
+
+    filter = module.get(NeomaExceptionFilter)
+  })
+
+  describe("Response", () => {
+    httpExceptions.forEach((exception: HttpException) => {
+      describe(`Given a ${exception.name}`, () => {
+        let response: { statusCode: number; json: jest.Mock }
+
+        beforeEach(() => {
+          const host = executionContext() as ArgumentsHost
+          filter.catch(exception, host)
+          response = host.switchToHttp().getResponse()
+        })
+
+        it(`should set a statusCode of ${exception.getStatus()}`, () => {
+          expect(response.statusCode).toBe(exception.getStatus())
+        })
+
+        it("should set the body to the exception response", () => {
+          expect(response.json).toHaveBeenCalledWith(exception.getResponse())
+        })
+      })
+    })
+
+    describe("Given an uncaught (non-HTTP) exception", () => {
+      let response: { statusCode: number; json: jest.Mock }
+
+      beforeEach(() => {
+        const host = executionContext() as ArgumentsHost
+        filter.catch(new Error(faker.hacker.phrase()), host)
+        response = host.switchToHttp().getResponse()
+      })
+
+      it("should set a statusCode of 500", () => {
+        expect(response.statusCode).toBe(HttpStatus.INTERNAL_SERVER_ERROR)
+      })
+
+      it("should set the body to a generic internal server error message", () => {
+        expect(response.json).toHaveBeenCalledWith({
+          statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
+          message: "Internal server error",
+          error: "Internal Server Error",
+        })
+      })
+    })
+
+    describe("Given a duck-typed exception", () => {
+      const name = faker.hacker.noun()
+      const statusCode = faker.number.int({
+        min: HttpStatus.BAD_REQUEST,
+        max: HttpStatus.INTERNAL_SERVER_ERROR,
+      })
+      const res = {
+        statusCode,
+        message: faker.hacker.phrase(),
+        error: faker.hacker.phrase(),
+      }
+      const customException = {
+        ...new Error(),
+        name,
+        getStatus: (): number => statusCode,
+        getResponse: (): object => res,
+      }
+      let response: { statusCode: number; json: jest.Mock }
+
+      beforeEach(() => {
+        const host = executionContext() as ArgumentsHost
+        filter.catch(customException, host)
+        response = host.switchToHttp().getResponse()
+      })
+
+      it(`should set a statusCode of the exception's getStatus() value`, () => {
+        expect(response.statusCode).toBe(statusCode)
+      })
+
+      it("should set the body to the exception's getResponse() value", () => {
+        expect(response.json).toHaveBeenCalledWith(res)
+      })
+    })
+  })
+
+  describe("Logging", () => {
+    warnExceptions.forEach((err: HttpException) => {
+      it(`should log a warning via the injected ApplicationLogger for ${err.name}s`, () => {
+        const host = executionContext() as ArgumentsHost
+        filter.catch(err, host)
+
+        expect(logger.warn).toHaveBeenCalledWith(
+          `[${err.getStatus()}] Request rejected - ${err.name}`,
+          { err },
+        )
+        // TODO(max-expects#317): assertion targets same subject; consider consolidation
+        // eslint-disable-next-line jest/max-expects
+        expect(logger.debug).not.toHaveBeenCalled()
+        // TODO(max-expects#317): assertion targets same subject; consider consolidation
+        // eslint-disable-next-line jest/max-expects
+        expect(logger.error).not.toHaveBeenCalled()
+      })
+    })
+
+    debugExceptions.forEach((err: HttpException) => {
+      it(`should log via the injected ApplicationLogger to log a debug message for ${err.name}s`, () => {
+        const host = executionContext() as ArgumentsHost
+        filter.catch(err, host)
+
+        expect(logger.debug).toHaveBeenCalledWith(
+          `[${err.getStatus()}] Resource not found - ${err.name}`,
+          { err },
+        )
+        // TODO(max-expects#317): assertion targets same subject; consider consolidation
+        // eslint-disable-next-line jest/max-expects
+        expect(logger.warn).not.toHaveBeenCalled()
+        // TODO(max-expects#317): assertion targets same subject; consider consolidation
+        // eslint-disable-next-line jest/max-expects
+        expect(logger.error).not.toHaveBeenCalled()
+      })
+    })
+
+    errorExceptions.forEach((err: HttpException) => {
+      it(`should log via the injected ApplicationLogger to log an error for ${err.name}s`, () => {
+        const host = executionContext() as ArgumentsHost
+        filter.catch(err, host)
+
+        expect(logger.error).toHaveBeenCalledWith(
+          `[${err.getStatus()}] Request failed - ${err.name}`,
+          { err },
+        )
+        // TODO(max-expects#317): assertion targets same subject; consider consolidation
+        // eslint-disable-next-line jest/max-expects
+        expect(logger.warn).not.toHaveBeenCalled()
+        // TODO(max-expects#317): assertion targets same subject; consider consolidation
+        // eslint-disable-next-line jest/max-expects
+        expect(logger.debug).not.toHaveBeenCalled()
+      })
+    })
+
+    unhandledExceptions.forEach((err: Error) => {
+      it(`should log via the injected ApplicationLogger to log an error for uncaught (non-http) exceptions of type ${err.constructor.name}`, () => {
+        const host = executionContext() as ArgumentsHost
+        filter.catch(err, host)
+
+        expect(logger.error).toHaveBeenCalledWith(
+          `[500] Request failed - ${err.name}`,
+          { err },
+        )
+        // TODO(max-expects#317): assertion targets same subject; consider consolidation
+        // eslint-disable-next-line jest/max-expects
+        expect(logger.warn).not.toHaveBeenCalled()
+        // TODO(max-expects#317): assertion targets same subject; consider consolidation
+        // eslint-disable-next-line jest/max-expects
+        expect(logger.debug).not.toHaveBeenCalled()
+      })
+    })
+
+    it("should log via the injected ApplicationLogger to log a debug message if a duck typed exception's getStatus function returns a 404", () => {
+      const name = faker.hacker.noun()
+      const statusCode = HttpStatus.NOT_FOUND
+      const customException = {
+        ...new Error(),
+        name,
+        getStatus: (): number => statusCode,
+        getResponse: (): object => ({
+          statusCode,
+          message: faker.hacker.phrase(),
+          error: faker.hacker.phrase(),
+        }),
+      }
+
+      const host = executionContext() as ArgumentsHost
+      filter.catch(customException, host)
+
+      expect(logger.debug).toHaveBeenCalledWith(
+        `[404] Resource not found - ${name}`,
+        { err: customException },
+      )
+      // TODO(max-expects#317): assertion targets same subject; consider consolidation
+      // eslint-disable-next-line jest/max-expects
+      expect(logger.warn).not.toHaveBeenCalled()
+      // TODO(max-expects#317): assertion targets same subject; consider consolidation
+      // eslint-disable-next-line jest/max-expects
+      expect(logger.error).not.toHaveBeenCalled()
+    })
+
+    it("should log via the injected ApplicationLogger to log a warning message if a duck typed exception's getStatus function returns a 4xx (excluding 404)", () => {
+      const name = faker.hacker.noun()
+      let statusCode = faker.number.int({
+        min: HttpStatus.BAD_REQUEST,
+        max: 499,
+      })
+      if (statusCode === HttpStatus.NOT_FOUND) {
+        // Ensure we don't accidentally pick 404
+        statusCode = HttpStatus.BAD_REQUEST
+      }
+      const customException = {
+        ...new Error(),
+        name,
+        getStatus: (): number => statusCode,
+        getResponse: (): object => ({
+          statusCode,
+          message: faker.hacker.phrase(),
+          error: faker.hacker.phrase(),
+        }),
+      }
+
+      const host = executionContext() as ArgumentsHost
+      filter.catch(customException, host)
+
+      expect(logger.warn).toHaveBeenCalledWith(
+        `[${statusCode}] Request rejected - ${name}`,
+        { err: customException },
+      )
+      // TODO(max-expects#317): assertion targets same subject; consider consolidation
+      // eslint-disable-next-line jest/max-expects
+      expect(logger.debug).not.toHaveBeenCalled()
+      // TODO(max-expects#317): assertion targets same subject; consider consolidation
+      // eslint-disable-next-line jest/max-expects
+      expect(logger.error).not.toHaveBeenCalled()
+    })
+
+    it("should log via the injected ApplicationLogger to log an error message if a duck typed exception's getStatus function returns a 5xx", () => {
+      const name = faker.hacker.noun()
+      const statusCode = faker.number.int({
+        min: HttpStatus.INTERNAL_SERVER_ERROR,
+        max: 599,
+      })
+      const customException = {
+        ...new Error(),
+        name,
+        getStatus: (): number => statusCode,
+        getResponse: (): object => ({
+          statusCode,
+          message: faker.hacker.phrase(),
+          error: faker.hacker.phrase(),
+        }),
+      }
+
+      const host = executionContext() as ArgumentsHost
+      filter.catch(customException, host)
+
+      expect(logger.error).toHaveBeenCalledWith(
+        `[${statusCode}] Request failed - ${name}`,
+        { err: customException },
+      )
+      // TODO(max-expects#317): assertion targets same subject; consider consolidation
+      // eslint-disable-next-line jest/max-expects
+      expect(logger.debug).not.toHaveBeenCalled()
+      // TODO(max-expects#317): assertion targets same subject; consider consolidation
+      // eslint-disable-next-line jest/max-expects
+      expect(logger.warn).not.toHaveBeenCalled()
+    })
+
+    describe("And the exception implements a log method", () => {
+      it("should call the exception's log method with the injected ApplicationLogger", () => {
+        const customException = {
+          ...new Error(),
+          name: faker.hacker.noun(),
+          log: jest.fn(),
+        }
+
+        const host = executionContext() as ArgumentsHost
+        filter.catch(customException, host)
+
+        expect(customException.log).toHaveBeenCalledWith(logger)
+        // TODO(max-expects#317): assertion targets same subject; consider consolidation
+        // eslint-disable-next-line jest/max-expects
+        expect(logger.warn).not.toHaveBeenCalled()
+        // TODO(max-expects#317): assertion targets same subject; consider consolidation
+        // eslint-disable-next-line jest/max-expects
+        expect(logger.debug).not.toHaveBeenCalled()
+        // TODO(max-expects#317): assertion targets same subject; consider consolidation
+        // eslint-disable-next-line jest/max-expects
+        expect(logger.error).not.toHaveBeenCalled()
+      })
+    })
+  })
+
+  describe("Content negotiation", () => {
+    const templateName = `${faker.word.noun()}/${faker.word.noun()}`
+    const errorTemplateOptions = { default: templateName }
+
+    it("should render the error template when the request accepts HTML and an error template is set", () => {
+      const exception = new NotFoundException(faker.hacker.phrase())
+      const req = express.request({
+        headers: { accept: "text/html,application/xhtml+xml" },
+      })
+      const res = express.response({
+        locals: {
+          errorTemplate: errorTemplateOptions,
+          version: faker.system.semver(),
+        },
+      })
+      const host = executionContext(req, res) as ArgumentsHost
+
+      filter.catch(exception, host)
+
+      const response = host.switchToHttp().getResponse()
+      expect(response.render).toHaveBeenCalledWith(templateName, {
+        ...res.locals,
+        exception: exception.getResponse(),
+      })
+      // TODO(max-expects#317): assertion targets same subject; consider consolidation
+      // eslint-disable-next-line jest/max-expects
+      expect(response.json).not.toHaveBeenCalled()
+    })
+
+    it("should respond with JSON when the request accepts HTML but no error template is set", () => {
+      const exception = new NotFoundException(faker.hacker.phrase())
+      const req = express.request({
+        headers: { accept: "text/html,application/xhtml+xml" },
+      })
+      const host = executionContext(req) as ArgumentsHost
+
+      filter.catch(exception, host)
+
+      const response = host.switchToHttp().getResponse()
+      expect(response.json).toHaveBeenCalledWith(exception.getResponse())
+      // TODO(max-expects#317): assertion targets same subject; consider consolidation
+      // eslint-disable-next-line jest/max-expects
+      expect(response.render).not.toHaveBeenCalled()
+    })
+
+    it("should respond with JSON when the request does not accept HTML even if an error template is set", () => {
+      const exception = new NotFoundException(faker.hacker.phrase())
+      const req = express.request({
+        headers: { accept: "application/json" },
+      })
+      const res = express.response({
+        locals: { errorTemplate: errorTemplateOptions },
+      })
+      const host = executionContext(req, res) as ArgumentsHost
+
+      filter.catch(exception, host)
+
+      const response = host.switchToHttp().getResponse()
+      expect(response.json).toHaveBeenCalledWith(exception.getResponse())
+      // TODO(max-expects#317): assertion targets same subject; consider consolidation
+      // eslint-disable-next-line jest/max-expects
+      expect(response.render).not.toHaveBeenCalled()
+    })
+
+    it("should respond with JSON when the request has no Accept header even if an error template is set", () => {
+      const exception = new NotFoundException(faker.hacker.phrase())
+      const req = express.request({ headers: {} })
+      const res = express.response({
+        locals: { errorTemplate: errorTemplateOptions },
+      })
+      const host = executionContext(req, res) as ArgumentsHost
+
+      filter.catch(exception, host)
+
+      const response = host.switchToHttp().getResponse()
+      expect(response.json).toHaveBeenCalledWith(exception.getResponse())
+      // TODO(max-expects#317): assertion targets same subject; consider consolidation
+      // eslint-disable-next-line jest/max-expects
+      expect(response.render).not.toHaveBeenCalled()
+    })
+
+    it("should log a debug message when rendering an error template", () => {
+      const exception = new BadRequestException(faker.hacker.phrase())
+      const req = express.request({
+        headers: { accept: "text/html" },
+      })
+      const res = express.response({
+        locals: { errorTemplate: errorTemplateOptions },
+      })
+      const host = executionContext(req, res) as ArgumentsHost
+
+      filter.catch(exception, host)
+
+      expect(logger.debug).toHaveBeenCalledWith(
+        `Rendering error template "${templateName}" for [${exception.getStatus()}]`,
+        { err: exception },
+      )
+    })
+
+    it("should render the error template for unhandled exceptions with a 500 status", () => {
+      const exception = new Error(faker.hacker.phrase())
+      const req = express.request({
+        headers: { accept: "text/html" },
+      })
+      const res = express.response({
+        locals: { errorTemplate: errorTemplateOptions },
+      })
+      const host = executionContext(req, res) as ArgumentsHost
+
+      filter.catch(exception, host)
+
+      const response = host.switchToHttp().getResponse()
+      expect(response.statusCode).toBe(HttpStatus.INTERNAL_SERVER_ERROR)
+      // TODO(max-expects#317): assertion targets same subject; consider consolidation
+      // eslint-disable-next-line jest/max-expects
+      expect(response.render).toHaveBeenCalledWith(templateName, {
+        ...res.locals,
+        exception: {
+          statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
+          message: "Internal server error",
+          error: "Internal Server Error",
+        },
+      })
+      // TODO(max-expects#317): assertion targets same subject; consider consolidation
+      // eslint-disable-next-line jest/max-expects
+      expect(response.json).not.toHaveBeenCalled()
+    })
+  })
+
+  describe("Content negotiation with exception-specific templates", () => {
+    const badRequestTemplate = `${faker.word.noun()}/${faker.word.noun()}`
+    const serverErrorTemplate = `${faker.word.noun()}/${faker.word.noun()}`
+    const defaultTemplate = `${faker.word.noun()}/${faker.word.noun()}`
+    const multiTemplateOptions = {
+      BadRequestException: badRequestTemplate,
+      InternalServerErrorException: serverErrorTemplate,
+      default: defaultTemplate,
+    }
+
+    it("should render the matched template for a BadRequestException", () => {
+      const exception = new BadRequestException(faker.hacker.phrase())
+      const req = express.request({
+        headers: { accept: "text/html" },
+      })
+      const res = express.response({
+        locals: { errorTemplate: multiTemplateOptions },
+      })
+      const host = executionContext(req, res) as ArgumentsHost
+
+      filter.catch(exception, host)
+
+      const response = host.switchToHttp().getResponse()
+      expect(response.render).toHaveBeenCalledWith(badRequestTemplate, {
+        ...res.locals,
+        exception: exception.getResponse(),
+      })
+      // TODO(max-expects#317): assertion targets same subject; consider consolidation
+      // eslint-disable-next-line jest/max-expects
+      expect(response.json).not.toHaveBeenCalled()
+    })
+
+    it("should render the matched template for an InternalServerErrorException", () => {
+      const exception = new InternalServerErrorException(faker.hacker.phrase())
+      const req = express.request({
+        headers: { accept: "text/html" },
+      })
+      const res = express.response({
+        locals: { errorTemplate: multiTemplateOptions },
+      })
+      const host = executionContext(req, res) as ArgumentsHost
+
+      filter.catch(exception, host)
+
+      const response = host.switchToHttp().getResponse()
+      expect(response.render).toHaveBeenCalledWith(serverErrorTemplate, {
+        ...res.locals,
+        exception: exception.getResponse(),
+      })
+      // TODO(max-expects#317): assertion targets same subject; consider consolidation
+      // eslint-disable-next-line jest/max-expects
+      expect(response.json).not.toHaveBeenCalled()
+    })
+
+    it("should fall back to the default template for a NotFoundException with no matching key", () => {
+      const exception = new NotFoundException(faker.hacker.phrase())
+      const req = express.request({
+        headers: { accept: "text/html" },
+      })
+      const res = express.response({
+        locals: { errorTemplate: multiTemplateOptions },
+      })
+      const host = executionContext(req, res) as ArgumentsHost
+
+      filter.catch(exception, host)
+
+      const response = host.switchToHttp().getResponse()
+      expect(response.render).toHaveBeenCalledWith(defaultTemplate, {
+        ...res.locals,
+        exception: exception.getResponse(),
+      })
+      // TODO(max-expects#317): assertion targets same subject; consider consolidation
+      // eslint-disable-next-line jest/max-expects
+      expect(response.json).not.toHaveBeenCalled()
+    })
+
+    it("should fall back to the default template for an unhandled Error", () => {
+      const exception = new Error(faker.hacker.phrase())
+      const req = express.request({
+        headers: { accept: "text/html" },
+      })
+      const res = express.response({
+        locals: { errorTemplate: multiTemplateOptions },
+      })
+      const host = executionContext(req, res) as ArgumentsHost
+
+      filter.catch(exception, host)
+
+      const response = host.switchToHttp().getResponse()
+      expect(response.render).toHaveBeenCalledWith(defaultTemplate, {
+        ...res.locals,
+        exception: {
+          statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
+          message: "Internal server error",
+          error: "Internal Server Error",
+        },
+      })
+      // TODO(max-expects#317): assertion targets same subject; consider consolidation
+      // eslint-disable-next-line jest/max-expects
+      expect(response.json).not.toHaveBeenCalled()
+    })
+
+    it("should respond with JSON when the request does not accept HTML", () => {
+      const exception = new BadRequestException(faker.hacker.phrase())
+      const req = express.request({
+        headers: { accept: "application/json" },
+      })
+      const res = express.response({
+        locals: { errorTemplate: multiTemplateOptions },
+      })
+      const host = executionContext(req, res) as ArgumentsHost
+
+      filter.catch(exception, host)
+
+      const response = host.switchToHttp().getResponse()
+      expect(response.json).toHaveBeenCalledWith(exception.getResponse())
+      // TODO(max-expects#317): assertion targets same subject; consider consolidation
+      // eslint-disable-next-line jest/max-expects
+      expect(response.render).not.toHaveBeenCalled()
+    })
+
+    it("should log the resolved template name in the debug message", () => {
+      const exception = new BadRequestException(faker.hacker.phrase())
+      const req = express.request({
+        headers: { accept: "text/html" },
+      })
+      const res = express.response({
+        locals: { errorTemplate: multiTemplateOptions },
+      })
+      const host = executionContext(req, res) as ArgumentsHost
+
+      filter.catch(exception, host)
+
+      expect(logger.debug).toHaveBeenCalledWith(
+        `Rendering error template "${badRequestTemplate}" for [${exception.getStatus()}]`,
+        { err: exception },
+      )
+    })
+  })
+
+  describe("Content negotiation with redirect templates", () => {
+    const exception = new InternalServerErrorException(faker.hacker.phrase())
+
+    it("should redirect with 303 See Other when the resolved template starts with /", () => {
+      const req = express.request({
+        headers: { accept: "text/html" },
+      })
+      const res = express.response({
+        locals: { errorTemplate: { default: "/error" } },
+      })
+      const host = executionContext(req, res) as ArgumentsHost
+
+      filter.catch(exception, host)
+
+      expect(host.switchToHttp().getResponse().redirect).toHaveBeenCalledWith(
+        HttpStatus.SEE_OTHER,
+        "/error",
+      )
+    })
+
+    it("should not render when the resolved template starts with /", () => {
+      const req = express.request({
+        headers: { accept: "text/html" },
+      })
+      const res = express.response({
+        locals: { errorTemplate: { default: "/error" } },
+      })
+      const host = executionContext(req, res) as ArgumentsHost
+
+      filter.catch(exception, host)
+
+      expect(host.switchToHttp().getResponse().render).not.toHaveBeenCalled()
+    })
+
+    it("should redirect for a matched exception whose template starts with /", () => {
+      const req = express.request({
+        headers: { accept: "text/html" },
+      })
+      const res = express.response({
+        locals: {
+          errorTemplate: {
+            InternalServerErrorException: "/server-error",
+            default: "errors/500",
+          },
+        },
+      })
+      const host = executionContext(req, res) as ArgumentsHost
+
+      filter.catch(exception, host)
+
+      expect(host.switchToHttp().getResponse().redirect).toHaveBeenCalledWith(
+        HttpStatus.SEE_OTHER,
+        "/server-error",
+      )
+    })
+
+    it("should redirect for the default when no exception matches and default starts with /", () => {
+      const req = express.request({
+        headers: { accept: "text/html" },
+      })
+      const res = express.response({
+        locals: {
+          errorTemplate: {
+            BadRequestException: "auth/magic-link",
+            default: "/error",
+          },
+        },
+      })
+      const host = executionContext(req, res) as ArgumentsHost
+
+      filter.catch(exception, host)
+
+      expect(host.switchToHttp().getResponse().redirect).toHaveBeenCalledWith(
+        HttpStatus.SEE_OTHER,
+        "/error",
+      )
+    })
+
+    it("should log a debug message when redirecting", () => {
+      const req = express.request({
+        headers: { accept: "text/html" },
+      })
+      const res = express.response({
+        locals: { errorTemplate: { default: "/error" } },
+      })
+      const host = executionContext(req, res) as ArgumentsHost
+
+      filter.catch(exception, host)
+
+      expect(logger.debug).toHaveBeenCalledWith(
+        `Redirecting to "/error" for [${exception.getStatus()}]`,
+        { err: exception },
+      )
+    })
+  })
+
+  describe("Content negotiation with getRedirect", () => {
+    it("should redirect when the exception has getRedirect() and the request accepts HTML", () => {
+      const err = {
+        ...new Error("Unauthenticated"),
+        name: "UnauthenticatedException",
+        getStatus: (): number => HttpStatus.UNAUTHORIZED,
+        getResponse: (): object => ({
+          statusCode: HttpStatus.UNAUTHORIZED,
+          message: "Unauthenticated",
+          error: "Unauthorized",
+        }),
+        getRedirect: (): { status: number; url: string } => ({
+          status: HttpStatus.SEE_OTHER,
+          url: "/login",
+        }),
+      }
+      const req = express.request({
+        headers: { accept: "text/html" },
+      })
+      const res = express.response()
+      const host = executionContext(req, res) as ArgumentsHost
+
+      filter.catch(err, host)
+
+      const response = host.switchToHttp().getResponse()
+      expect(response.redirect).toHaveBeenCalledWith(
+        HttpStatus.SEE_OTHER,
+        "/login",
+      )
+      // TODO(max-expects#317): assertion targets same subject; consider consolidation
+      // eslint-disable-next-line jest/max-expects
+      expect(response.json).not.toHaveBeenCalled()
+      // TODO(max-expects#317): assertion targets same subject; consider consolidation
+      // eslint-disable-next-line jest/max-expects
+      expect(response.render).not.toHaveBeenCalled()
+    })
+
+    it("should use the status code from getRedirect()", () => {
+      const err = {
+        ...new Error("Moved"),
+        name: "MovedException",
+        getStatus: (): number => HttpStatus.MOVED_PERMANENTLY,
+        getResponse: (): object => ({
+          statusCode: HttpStatus.MOVED_PERMANENTLY,
+          message: "Moved",
+          error: "Moved Permanently",
+        }),
+        getRedirect: (): { status: number; url: string } => ({
+          status: HttpStatus.MOVED_PERMANENTLY,
+          url: "/new-path",
+        }),
+      }
+      const req = express.request({
+        headers: { accept: "text/html" },
+      })
+      const res = express.response()
+      const host = executionContext(req, res) as ArgumentsHost
+
+      filter.catch(err, host)
+
+      const response = host.switchToHttp().getResponse()
+      expect(response.redirect).toHaveBeenCalledWith(
+        HttpStatus.MOVED_PERMANENTLY,
+        "/new-path",
+      )
+    })
+
+    it("should take priority over @ErrorTemplate", () => {
+      const err = {
+        ...new Error("Unauthenticated"),
+        name: "UnauthenticatedException",
+        getStatus: (): number => HttpStatus.UNAUTHORIZED,
+        getResponse: (): object => ({
+          statusCode: HttpStatus.UNAUTHORIZED,
+          message: "Unauthenticated",
+          error: "Unauthorized",
+        }),
+        getRedirect: (): { status: number; url: string } => ({
+          status: HttpStatus.SEE_OTHER,
+          url: "/login",
+        }),
+      }
+      const req = express.request({
+        headers: { accept: "text/html" },
+      })
+      const res = express.response({
+        locals: { errorTemplate: { default: "error" } },
+      })
+      const host = executionContext(req, res) as ArgumentsHost
+
+      filter.catch(err, host)
+
+      const response = host.switchToHttp().getResponse()
+      expect(response.redirect).toHaveBeenCalledWith(
+        HttpStatus.SEE_OTHER,
+        "/login",
+      )
+      // TODO(max-expects#317): assertion targets same subject; consider consolidation
+      // eslint-disable-next-line jest/max-expects
+      expect(response.render).not.toHaveBeenCalled()
+      // TODO(max-expects#317): assertion targets same subject; consider consolidation
+      // eslint-disable-next-line jest/max-expects
+      expect(response.json).not.toHaveBeenCalled()
+    })
+
+    it("should log a warning and fall through when getRedirect() returns undefined", () => {
+      const err = {
+        ...new Error("Bad redirect"),
+        name: "BadRedirectException",
+        getStatus: (): number => HttpStatus.UNAUTHORIZED,
+        getResponse: (): object => ({
+          statusCode: HttpStatus.UNAUTHORIZED,
+          message: "Unauthorized",
+          error: "Unauthorized",
+        }),
+        getRedirect: (): undefined => undefined,
+      }
+      const req = express.request({
+        headers: { accept: "text/html" },
+      })
+      const res = express.response()
+      const host = executionContext(req, res) as ArgumentsHost
+
+      filter.catch(err, host)
+
+      const response = host.switchToHttp().getResponse()
+      expect(logger.warn).toHaveBeenCalledWith(
+        `getRedirect() returned an invalid value — falling through to default handling`,
+        { err },
+      )
+      // TODO(max-expects#317): assertion targets same subject; consider consolidation
+      // eslint-disable-next-line jest/max-expects
+      expect(response.redirect).not.toHaveBeenCalled()
+      // TODO(max-expects#317): assertion targets same subject; consider consolidation
+      // eslint-disable-next-line jest/max-expects
+      expect(response.json).toHaveBeenCalled()
+    })
+
+    it("should log a warning and fall through when getRedirect() returns an object missing url", () => {
+      const err = {
+        ...new Error("Missing url"),
+        name: "MissingUrlException",
+        getStatus: (): number => HttpStatus.UNAUTHORIZED,
+        getResponse: (): object => ({
+          statusCode: HttpStatus.UNAUTHORIZED,
+          message: "Unauthorized",
+          error: "Unauthorized",
+        }),
+        getRedirect: (): any => ({ status: 302 }),
+      }
+      const req = express.request({
+        headers: { accept: "text/html" },
+      })
+      const res = express.response()
+      const host = executionContext(req, res) as ArgumentsHost
+
+      filter.catch(err, host)
+
+      const response = host.switchToHttp().getResponse()
+      expect(logger.warn).toHaveBeenCalledWith(
+        `getRedirect() returned an invalid value — falling through to default handling`,
+        { err },
+      )
+      // TODO(max-expects#317): assertion targets same subject; consider consolidation
+      // eslint-disable-next-line jest/max-expects
+      expect(response.redirect).not.toHaveBeenCalled()
+      // TODO(max-expects#317): assertion targets same subject; consider consolidation
+      // eslint-disable-next-line jest/max-expects
+      expect(response.json).toHaveBeenCalled()
+    })
+
+    it("should fall through to JSON when the request does not accept HTML even if getRedirect() is present", () => {
+      const err = {
+        ...new Error("Unauthenticated"),
+        name: "UnauthenticatedException",
+        getStatus: (): number => HttpStatus.UNAUTHORIZED,
+        getResponse: (): object => ({
+          statusCode: HttpStatus.UNAUTHORIZED,
+          message: "Unauthenticated",
+          error: "Unauthorized",
+        }),
+        getRedirect: (): { status: number; url: string } => ({
+          status: HttpStatus.SEE_OTHER,
+          url: "/login",
+        }),
+      }
+      const req = express.request({
+        headers: { accept: "application/json" },
+      })
+      const res = express.response()
+      const host = executionContext(req, res) as ArgumentsHost
+
+      filter.catch(err, host)
+
+      const response = host.switchToHttp().getResponse()
+      expect(response.json).toHaveBeenCalledWith(err.getResponse())
+      // TODO(max-expects#317): assertion targets same subject; consider consolidation
+      // eslint-disable-next-line jest/max-expects
+      expect(response.redirect).not.toHaveBeenCalled()
+    })
+
+    it("should log a debug message when redirecting via getRedirect()", () => {
+      const err = {
+        ...new Error("Unauthenticated"),
+        name: "UnauthenticatedException",
+        getStatus: (): number => HttpStatus.UNAUTHORIZED,
+        getResponse: (): object => ({
+          statusCode: HttpStatus.UNAUTHORIZED,
+          message: "Unauthenticated",
+          error: "Unauthorized",
+        }),
+        getRedirect: (): { status: number; url: string } => ({
+          status: HttpStatus.SEE_OTHER,
+          url: "/login",
+        }),
+      }
+      const req = express.request({
+        headers: { accept: "text/html" },
+      })
+      const res = express.response()
+      const host = executionContext(req, res) as ArgumentsHost
+
+      filter.catch(err, host)
+
+      expect(logger.debug).toHaveBeenCalledWith(
+        `Redirecting [${HttpStatus.UNAUTHORIZED}] to "/login" with ${HttpStatus.SEE_OTHER}`,
+        { err },
+      )
+    })
+  })
+
+  describe("Global fallback templates", () => {
+    const defaultTemplate = `${faker.word.noun()}/default`
+    const notFoundTemplate = `${faker.word.noun()}/not-found`
+    const serverErrorTemplate = `${faker.word.noun()}/server-error`
+
+    describe("Given errorTemplates with a status-keyed entry matching the exception", () => {
+      beforeEach(async () => {
+        const module = await Test.createTestingModule({
+          providers: [
+            NeomaExceptionFilter,
+            { provide: ApplicationLogger, useValue: logger },
+            {
+              provide: MODULE_OPTIONS_TOKEN,
+              useValue: {
+                errorTemplates: {
+                  default: defaultTemplate,
+                  [HttpStatus.NOT_FOUND]: notFoundTemplate,
+                },
+              },
+            },
+          ],
+        }).compile()
+        filter = module.get(NeomaExceptionFilter)
+      })
+
+      it("should render the status-keyed template", () => {
+        const exception = new NotFoundException(faker.hacker.phrase())
+        const req = express.request({ headers: { accept: "text/html" } })
+        const res = express.response()
+        const host = executionContext(req, res) as ArgumentsHost
+
+        filter.catch(exception, host)
+
+        const response = host.switchToHttp().getResponse()
+        expect(response.render).toHaveBeenCalledWith(notFoundTemplate, {
+          ...res.locals,
+          exception: exception.getResponse(),
+        })
+        // TODO(max-expects#317): assertion targets same subject; consider consolidation
+        // eslint-disable-next-line jest/max-expects
+        expect(response.json).not.toHaveBeenCalled()
+      })
+    })
+
+    describe("Given errorTemplates with no status-keyed entry matching", () => {
+      beforeEach(async () => {
+        const module = await Test.createTestingModule({
+          providers: [
+            NeomaExceptionFilter,
+            { provide: ApplicationLogger, useValue: logger },
+            {
+              provide: MODULE_OPTIONS_TOKEN,
+              useValue: { errorTemplates: { default: defaultTemplate } },
+            },
+          ],
+        }).compile()
+        filter = module.get(NeomaExceptionFilter)
+      })
+
+      it("should fall back to the default template", () => {
+        const exception = new BadRequestException(faker.hacker.phrase())
+        const req = express.request({ headers: { accept: "text/html" } })
+        const res = express.response()
+        const host = executionContext(req, res) as ArgumentsHost
+
+        filter.catch(exception, host)
+
+        const response = host.switchToHttp().getResponse()
+        expect(response.render).toHaveBeenCalledWith(defaultTemplate, {
+          ...res.locals,
+          exception: exception.getResponse(),
+        })
+      })
+    })
+
+    describe("Given errorTemplates with a 500 entry and an unhandled Error", () => {
+      beforeEach(async () => {
+        const module = await Test.createTestingModule({
+          providers: [
+            NeomaExceptionFilter,
+            { provide: ApplicationLogger, useValue: logger },
+            {
+              provide: MODULE_OPTIONS_TOKEN,
+              useValue: {
+                errorTemplates: {
+                  default: defaultTemplate,
+                  [HttpStatus.INTERNAL_SERVER_ERROR]: serverErrorTemplate,
+                },
+              },
+            },
+          ],
+        }).compile()
+        filter = module.get(NeomaExceptionFilter)
+      })
+
+      it("should render the 500 template using normalised status", () => {
+        const exception = new Error(faker.hacker.phrase())
+        const req = express.request({ headers: { accept: "text/html" } })
+        const res = express.response()
+        const host = executionContext(req, res) as ArgumentsHost
+
+        filter.catch(exception, host)
+
+        const response = host.switchToHttp().getResponse()
+        expect(response.statusCode).toBe(HttpStatus.INTERNAL_SERVER_ERROR)
+        // TODO(max-expects#317): assertion targets same subject; consider consolidation
+        // eslint-disable-next-line jest/max-expects
+        expect(response.render).toHaveBeenCalledWith(serverErrorTemplate, {
+          ...res.locals,
+          exception: {
+            statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
+            message: "Internal server error",
+            error: "Internal Server Error",
+          },
+        })
+      })
+    })
+
+    describe("Given errorTemplates is not configured (preserved default behaviour)", () => {
+      beforeEach(async () => {
+        const module = await Test.createTestingModule({
+          providers: [
+            NeomaExceptionFilter,
+            { provide: ApplicationLogger, useValue: logger },
+            { provide: MODULE_OPTIONS_TOKEN, useValue: {} },
+          ],
+        }).compile()
+        filter = module.get(NeomaExceptionFilter)
+      })
+
+      it("should respond with JSON for HTML requests, matching pre-forRoot behaviour", () => {
+        const exception = new NotFoundException(faker.hacker.phrase())
+        const req = express.request({ headers: { accept: "text/html" } })
+        const res = express.response()
+        const host = executionContext(req, res) as ArgumentsHost
+
+        filter.catch(exception, host)
+
+        const response = host.switchToHttp().getResponse()
+        expect(response.json).toHaveBeenCalledWith(exception.getResponse())
+        // TODO(max-expects#317): assertion targets same subject; consider consolidation
+        // eslint-disable-next-line jest/max-expects
+        expect(response.render).not.toHaveBeenCalled()
+      })
+    })
+
+    describe("Given a route-level @ErrorTemplate is also set", () => {
+      beforeEach(async () => {
+        const module = await Test.createTestingModule({
+          providers: [
+            NeomaExceptionFilter,
+            { provide: ApplicationLogger, useValue: logger },
+            {
+              provide: MODULE_OPTIONS_TOKEN,
+              useValue: {
+                errorTemplates: {
+                  default: defaultTemplate,
+                  [HttpStatus.NOT_FOUND]: notFoundTemplate,
+                },
+              },
+            },
+          ],
+        }).compile()
+        filter = module.get(NeomaExceptionFilter)
+      })
+
+      it("should prefer the route template over the global fallback", () => {
+        const routeTemplate = `${faker.word.noun()}/route`
+        const exception = new NotFoundException(faker.hacker.phrase())
+        const req = express.request({ headers: { accept: "text/html" } })
+        const res = express.response({
+          locals: { errorTemplate: { default: routeTemplate } },
+        })
+        const host = executionContext(req, res) as ArgumentsHost
+
+        filter.catch(exception, host)
+
+        const response = host.switchToHttp().getResponse()
+        expect(response.render).toHaveBeenCalledWith(routeTemplate, {
+          ...res.locals,
+          exception: exception.getResponse(),
+        })
+      })
+    })
+
+    describe("Given the exception declares getRedirect()", () => {
+      beforeEach(async () => {
+        const module = await Test.createTestingModule({
+          providers: [
+            NeomaExceptionFilter,
+            { provide: ApplicationLogger, useValue: logger },
+            {
+              provide: MODULE_OPTIONS_TOKEN,
+              useValue: { errorTemplates: { default: defaultTemplate } },
+            },
+          ],
+        }).compile()
+        filter = module.get(NeomaExceptionFilter)
+      })
+
+      it("should redirect, ignoring both route and global templates", () => {
+        const err = {
+          ...new Error("Unauthenticated"),
+          name: "UnauthenticatedException",
+          getStatus: (): number => HttpStatus.UNAUTHORIZED,
+          getResponse: (): object => ({
+            statusCode: HttpStatus.UNAUTHORIZED,
+            message: "Unauthenticated",
+            error: "Unauthorized",
+          }),
+          getRedirect: (): { status: number; url: string } => ({
+            status: HttpStatus.SEE_OTHER,
+            url: "/login",
+          }),
+        }
+        const req = express.request({ headers: { accept: "text/html" } })
+        const res = express.response()
+        const host = executionContext(req, res) as ArgumentsHost
+
+        filter.catch(err, host)
+
+        const response = host.switchToHttp().getResponse()
+        expect(response.redirect).toHaveBeenCalledWith(
+          HttpStatus.SEE_OTHER,
+          "/login",
+        )
+        // TODO(max-expects#317): assertion targets same subject; consider consolidation
+        // eslint-disable-next-line jest/max-expects
+        expect(response.render).not.toHaveBeenCalled()
+        // TODO(max-expects#317): assertion targets same subject; consider consolidation
+        // eslint-disable-next-line jest/max-expects
+        expect(response.json).not.toHaveBeenCalled()
+      })
+    })
+
+    describe("Given a status-keyed entry starts with /", () => {
+      beforeEach(async () => {
+        const module = await Test.createTestingModule({
+          providers: [
+            NeomaExceptionFilter,
+            { provide: ApplicationLogger, useValue: logger },
+            {
+              provide: MODULE_OPTIONS_TOKEN,
+              useValue: {
+                errorTemplates: {
+                  default: defaultTemplate,
+                  [HttpStatus.NOT_FOUND]: "/not-found",
+                },
+              },
+            },
+          ],
+        }).compile()
+        filter = module.get(NeomaExceptionFilter)
+      })
+
+      it("should issue a 303 See Other redirect", () => {
+        const exception = new NotFoundException(faker.hacker.phrase())
+        const req = express.request({ headers: { accept: "text/html" } })
+        const res = express.response()
+        const host = executionContext(req, res) as ArgumentsHost
+
+        filter.catch(exception, host)
+
+        const response = host.switchToHttp().getResponse()
+        expect(response.redirect).toHaveBeenCalledWith(
+          HttpStatus.SEE_OTHER,
+          "/not-found",
+        )
+        // TODO(max-expects#317): assertion targets same subject; consider consolidation
+        // eslint-disable-next-line jest/max-expects
+        expect(response.render).not.toHaveBeenCalled()
+      })
+    })
+
+    describe("Given errorTemplates has both a name-keyed entry and a status-keyed entry", () => {
+      const nameTemplate = `${faker.word.noun()}/name`
+      const statusTemplate = `${faker.word.noun()}/status`
+
+      beforeEach(async () => {
+        const module = await Test.createTestingModule({
+          providers: [
+            NeomaExceptionFilter,
+            { provide: ApplicationLogger, useValue: logger },
+            {
+              provide: MODULE_OPTIONS_TOKEN,
+              useValue: {
+                errorTemplates: {
+                  default: defaultTemplate,
+                  NotFoundException: nameTemplate,
+                  [HttpStatus.NOT_FOUND]: statusTemplate,
+                },
+              },
+            },
+          ],
+        }).compile()
+        filter = module.get(NeomaExceptionFilter)
+      })
+
+      it("should render the name-keyed template (most specific wins)", () => {
+        const exception = new NotFoundException(faker.hacker.phrase())
+        const req = express.request({ headers: { accept: "text/html" } })
+        const res = express.response()
+        const host = executionContext(req, res) as ArgumentsHost
+
+        filter.catch(exception, host)
+
+        const response = host.switchToHttp().getResponse()
+        expect(response.render).toHaveBeenCalledWith(nameTemplate, {
+          ...res.locals,
+          exception: exception.getResponse(),
+        })
+      })
+    })
+
+    describe("Given errorTemplates has only a name-keyed entry matching the exception", () => {
+      const nameTemplate = `${faker.word.noun()}/name`
+
+      beforeEach(async () => {
+        const module = await Test.createTestingModule({
+          providers: [
+            NeomaExceptionFilter,
+            { provide: ApplicationLogger, useValue: logger },
+            {
+              provide: MODULE_OPTIONS_TOKEN,
+              useValue: {
+                errorTemplates: {
+                  default: defaultTemplate,
+                  BadRequestException: nameTemplate,
+                },
+              },
+            },
+          ],
+        }).compile()
+        filter = module.get(NeomaExceptionFilter)
+      })
+
+      it("should render the name-keyed template", () => {
+        const exception = new BadRequestException(faker.hacker.phrase())
+        const req = express.request({ headers: { accept: "text/html" } })
+        const res = express.response()
+        const host = executionContext(req, res) as ArgumentsHost
+
+        filter.catch(exception, host)
+
+        const response = host.switchToHttp().getResponse()
+        expect(response.render).toHaveBeenCalledWith(nameTemplate, {
+          ...res.locals,
+          exception: exception.getResponse(),
+        })
+      })
+    })
+
+    describe("Given the request does not accept HTML", () => {
+      beforeEach(async () => {
+        const module = await Test.createTestingModule({
+          providers: [
+            NeomaExceptionFilter,
+            { provide: ApplicationLogger, useValue: logger },
+            {
+              provide: MODULE_OPTIONS_TOKEN,
+              useValue: { errorTemplates: { default: defaultTemplate } },
+            },
+          ],
+        }).compile()
+        filter = module.get(NeomaExceptionFilter)
+      })
+
+      it("should respond with JSON even when errorTemplates is configured", () => {
+        const exception = new NotFoundException(faker.hacker.phrase())
+        const req = express.request({
+          headers: { accept: "application/json" },
+        })
+        const res = express.response()
+        const host = executionContext(req, res) as ArgumentsHost
+
+        filter.catch(exception, host)
+
+        const response = host.switchToHttp().getResponse()
+        expect(response.json).toHaveBeenCalledWith(exception.getResponse())
+        // TODO(max-expects#317): assertion targets same subject; consider consolidation
+        // eslint-disable-next-line jest/max-expects
+        expect(response.render).not.toHaveBeenCalled()
+      })
+    })
+  })
+
+  describe("errorContext resolver", () => {
+    const defaultTemplate = `${faker.word.noun()}/default`
+
+    describe("Given errorContext is configured with an account resolver", () => {
+      const account = {
+        id: faker.string.uuid(),
+        email: faker.internet.email(),
+      }
+
+      beforeEach(async () => {
+        const module = await Test.createTestingModule({
+          providers: [
+            NeomaExceptionFilter,
+            { provide: ApplicationLogger, useValue: logger },
+            {
+              provide: MODULE_OPTIONS_TOKEN,
+              useValue: {
+                errorTemplates: { default: defaultTemplate },
+                errorContext: (): { account: typeof account } => ({ account }),
+              },
+            },
+          ],
+        }).compile()
+        filter = module.get(NeomaExceptionFilter)
+      })
+
+      it("should merge the resolved context into the render arguments", () => {
+        const exception = new NotFoundException(faker.hacker.phrase())
+        const req = express.request({ headers: { accept: "text/html" } })
+        const res = express.response({
+          locals: { version: faker.system.semver() },
+        })
+        const host = executionContext(req, res) as ArgumentsHost
+
+        filter.catch(exception, host)
+
+        const response = host.switchToHttp().getResponse()
+        expect(response.render).toHaveBeenCalledWith(defaultTemplate, {
+          ...res.locals,
+          account,
+          exception: exception.getResponse(),
+        })
+      })
+    })
+
+    describe("Given errorContext tries to override the exception key", () => {
+      const hijack = { hijacked: true }
+
+      beforeEach(async () => {
+        const module = await Test.createTestingModule({
+          providers: [
+            NeomaExceptionFilter,
+            { provide: ApplicationLogger, useValue: logger },
+            {
+              provide: MODULE_OPTIONS_TOKEN,
+              useValue: {
+                errorTemplates: { default: defaultTemplate },
+                errorContext: (): { exception: typeof hijack } => ({
+                  exception: hijack,
+                }),
+              },
+            },
+          ],
+        }).compile()
+        filter = module.get(NeomaExceptionFilter)
+      })
+
+      it("should not allow errorContext to override the exception key", () => {
+        const exception = new NotFoundException(faker.hacker.phrase())
+        const req = express.request({ headers: { accept: "text/html" } })
+        const res = express.response()
+        const host = executionContext(req, res) as ArgumentsHost
+
+        filter.catch(exception, host)
+
+        const response = host.switchToHttp().getResponse()
+        expect(response.render).toHaveBeenCalledWith(defaultTemplate, {
+          ...res.locals,
+          exception: exception.getResponse(),
+        })
+      })
+    })
+  })
+})
