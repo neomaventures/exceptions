@@ -1,6 +1,6 @@
 {
   "name": "@neomaventures/exceptions",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Exception handling for server-rendered NestJS apps — map exceptions to error templates per route, with a global fallback and content negotiation.",
   "type": "commonjs",
   "author": "Daniel Bruce",
