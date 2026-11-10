@@ -339,7 +339,7 @@ For unhandled (non-HTTP) exceptions:
 
 ### Validation
 
-The module registers a global `ValidationPipe` that transforms validation errors into a field-keyed shape:
+The module registers a global `ValidationPipe`. It hands each route its DTO as an instance of the DTO's class, with the values its `class-transformer` decorators (such as `@Transform` or `@Type`) transform them to, so a route's query, params and body arrive typed. It transforms validation errors into a field-keyed shape:
 
 ```json
 {
@@ -559,7 +559,7 @@ export class AppModule {}
 Registers:
 
 - `NeomaExceptionFilter` as a global `APP_FILTER`
-- `ValidationPipe` with `validationFactory` as a global `APP_PIPE`
+- `ValidationPipe` with `transform: true` and `validationFactory` as a global `APP_PIPE`
 - An internal `APP_GUARD` that bridges `@ErrorTemplate` metadata onto `res.locals` (see [Module import order](#module-import-order))
 
 ### `NeomaExceptionFilter`

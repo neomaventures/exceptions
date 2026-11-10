@@ -83,8 +83,10 @@ import { validationFactory } from "./pipes/validation.factory"
  *
  * ## Validation
  *
- * A global `ValidationPipe` is registered with a custom factory that
- * transforms validation errors into a field-keyed shape:
+ * A global `ValidationPipe` is registered that hands each route its DTO,
+ * with the values its `class-transformer` decorators transform them to,
+ * and a custom factory that transforms validation errors into a
+ * field-keyed shape:
  * ```json
  * { "email": { "value": "bad", "error": "must be a valid email" } }
  * ```
@@ -99,7 +101,10 @@ import { validationFactory } from "./pipes/validation.factory"
     { provide: APP_FILTER, useClass: NeomaExceptionFilter },
     {
       provide: APP_PIPE,
-      useValue: new ValidationPipe({ exceptionFactory: validationFactory }),
+      useValue: new ValidationPipe({
+        transform: true,
+        exceptionFactory: validationFactory,
+      }),
     },
     { provide: APP_GUARD, useClass: ErrorTemplateMetadataBridge },
   ],
